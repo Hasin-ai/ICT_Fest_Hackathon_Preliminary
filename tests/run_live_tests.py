@@ -471,6 +471,128 @@ def test_token_revocation_and_rotation():
     print("Token revocation and rotation OK!")
 
 
+def test_quota_concurrency_race():
+    print("Testing concurrent booking quota race...")
+    org_name = f"quota-con-{time.time()}"
+    requests.post(
+        f"{BASE_URL}/auth/register",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    )
+    token = requests.post(
+        f"{BASE_URL}/auth/login",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    room = requests.post(
+        f"{BASE_URL}/rooms",
+        json={"name": "Conference", "capacity": 10, "hourly_rate_cents": 1000},
+        headers=headers,
+    )
+    room_id = room.json()["id"]
+
+    requests.post(
+        f"{BASE_URL}/bookings",
+        json={"room_id": room_id, "start_time": _future(2), "end_time": _future(3)},
+        headers=headers,
+    )
+    requests.post(
+        f"{BASE_URL}/bookings",
+        json={"room_id": room_id, "start_time": _future(4), "end_time": _future(5)},
+        headers=headers,
+    )
+
+    def book_slot(start_h, end_h):
+        return requests.post(
+            f"{BASE_URL}/bookings",
+            json={"room_id": room_id, "start_time": _future(start_h), "end_time": _future(end_h)},
+            headers=headers,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(book_slot, 6, 7)
+        f2 = executor.submit(book_slot, 8, 9)
+        r1 = f1.result()
+        r2 = f2.result()
+
+    successes = [r for r in [r1, r2] if r.status_code == 201]
+    quota_exceeded = [r for r in [r1, r2] if r.status_code == 409 and r.json()["code"] == "QUOTA EXCEEDED"]
+
+    assert len(successes) == 1
+    assert len(quota_exceeded) == 1
+    print("Concurrent booking quota race OK!")
+
+
+def test_back_to_back_bookings():
+    print("Testing back-to-back vs overlapping bookings...")
+    org_name = f"btb-org-{time.time()}"
+    requests.post(
+        f"{BASE_URL}/auth/register",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    )
+    token = requests.post(
+        f"{BASE_URL}/auth/login",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    room = requests.post(
+        f"{BASE_URL}/rooms",
+        json={"name": "Conference", "capacity": 10, "hourly_rate_cents": 1000},
+        headers=headers,
+    )
+    room_id = room.json()["id"]
+
+    b1 = requests.post(
+        f"{BASE_URL}/bookings",
+        json={"room_id": room_id, "start_time": _future(30), "end_time": _future(32)},
+        headers=headers,
+    )
+    assert b1.status_code == 201
+
+    b2 = requests.post(
+        f"{BASE_URL}/bookings",
+        json={"room_id": room_id, "start_time": _future(32), "end_time": _future(33)},
+        headers=headers,
+    )
+    assert b2.status_code == 201
+
+    b3 = requests.post(
+        f"{BASE_URL}/bookings",
+        json={"room_id": room_id, "start_time": _future(31), "end_time": _future(33)},
+        headers=headers,
+    )
+    assert b3.status_code == 409
+    assert b3.json()["code"] == "ROOM CONFLICT"
+    print("Back-to-back vs overlapping bookings OK!")
+
+
+def test_jwt_invalid_algorithm():
+    print("Testing JWT none algorithm protection...")
+    import base64
+    import json
+    header = {"alg": "none", "typ": "JWT"}
+    payload = {
+        "sub": "1",
+        "org": 1,
+        "role": "member",
+        "jti": "somejti",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 900,
+        "type": "access",
+    }
+    def b64_json(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+
+    none_token = f"{b64_json(header)}.{b64_json(payload)}."
+    headers = {"Authorization": f"Bearer {none_token}"}
+
+    res = requests.get(f"{BASE_URL}/rooms", headers=headers)
+    assert res.status_code == 401
+    assert res.json()["code"] == "UNAUTHORIZED"
+    print("JWT none algorithm protection OK!")
+
+
 if __name__ == "__main__":
     try:
         test_health()
@@ -485,6 +607,9 @@ if __name__ == "__main__":
         test_refund_rounding_and_tiers()
         test_multi_tenancy_isolation()
         test_token_revocation_and_rotation()
+        test_quota_concurrency_race()
+        test_back_to_back_bookings()
+        test_jwt_invalid_algorithm()
         print("\nAll live tests completed successfully!")
     except AssertionError as e:
         print(f"\nAssertion Error: {e}")
@@ -492,3 +617,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nUnexpected Error: {e}")
         sys.exit(1)
+

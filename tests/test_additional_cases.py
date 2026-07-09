@@ -243,3 +243,127 @@ def test_token_revocation_and_rotation():
     # Old refresh token should be invalidated (single-use) -> 401
     refresh_res_old = client.post("/auth/refresh", json={"refresh_token": refresh_token})
     assert refresh_res_old.status_code == 401
+
+
+def test_quota_concurrency_race():
+    import concurrent.futures
+    org_name = f"quota-con-{time.time()}"
+    client.post(
+        "/auth/register",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    )
+    token = client.post(
+        "/auth/login",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    room = client.post(
+        "/rooms",
+        json={"name": "Conference", "capacity": 10, "hourly_rate_cents": 1000},
+        headers=headers,
+    )
+    room_id = room.json()["id"]
+
+    # Book 2 slots in the next 24 hours first (so user has 2 confirmed bookings)
+    client.post(
+        "/bookings",
+        json={"room_id": room_id, "start_time": _future(2), "end_time": _future(3)},
+        headers=headers,
+    )
+    client.post(
+        "/bookings",
+        json={"room_id": room_id, "start_time": _future(4), "end_time": _future(5)},
+        headers=headers,
+    )
+
+    # Concurrently attempt to book 2 different slots (hours 6-7 and hours 8-9)
+    # Only one should succeed as user already holds 2 confirmed bookings and limit is 3.
+    def book_slot(start_h, end_h):
+        return client.post(
+            "/bookings",
+            json={"room_id": room_id, "start_time": _future(start_h), "end_time": _future(end_h)},
+            headers=headers,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(book_slot, 6, 7)
+        f2 = executor.submit(book_slot, 8, 9)
+        r1 = f1.result()
+        r2 = f2.result()
+
+    successes = [r for r in [r1, r2] if r.status_code == 201]
+    quota_exceeded = [r for r in [r1, r2] if r.status_code == 409 and r.json()["code"] == "QUOTA EXCEEDED"]
+
+    assert len(successes) == 1
+    assert len(quota_exceeded) == 1
+
+
+def test_back_to_back_bookings():
+    org_name = f"btb-org-{time.time()}"
+    client.post(
+        "/auth/register",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    )
+    token = client.post(
+        "/auth/login",
+        json={"org_name": org_name, "username": "alice", "password": "password123"},
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    room = client.post(
+        "/rooms",
+        json={"name": "Conference", "capacity": 10, "hourly_rate_cents": 1000},
+        headers=headers,
+    )
+    room_id = room.json()["id"]
+
+    # Book 30 to 32 hours out
+    b1 = client.post(
+        "/bookings",
+        json={"room_id": room_id, "start_time": _future(30), "end_time": _future(32)},
+        headers=headers,
+    )
+    assert b1.status_code == 201
+
+    # Book 32 to 33 hours out (back-to-back, starts exactly when b1 ends -> should be ALLOWED)
+    b2 = client.post(
+        "/bookings",
+        json={"room_id": room_id, "start_time": _future(32), "end_time": _future(33)},
+        headers=headers,
+    )
+    assert b2.status_code == 201
+
+    # Try booking 31 to 33 hours out (overlaps by 1 hour -> should be REJECTED)
+    b3 = client.post(
+        "/bookings",
+        json={"room_id": room_id, "start_time": _future(31), "end_time": _future(33)},
+        headers=headers,
+    )
+    assert b3.status_code == 409
+    assert b3.json()["code"] == "ROOM CONFLICT"
+
+
+def test_jwt_invalid_algorithm():
+    import base64
+    import json
+    header = {"alg": "none", "typ": "JWT"}
+    payload = {
+        "sub": "1",
+        "org": 1,
+        "role": "member",
+        "jti": "somejti",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 900,
+        "type": "access",
+    }
+    def b64_json(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+
+    none_token = f"{b64_json(header)}.{b64_json(payload)}."
+    headers = {"Authorization": f"Bearer {none_token}"}
+
+    res = client.get("/rooms", headers=headers)
+    assert res.status_code == 401
+    assert res.json()["code"] == "UNAUTHORIZED"
+

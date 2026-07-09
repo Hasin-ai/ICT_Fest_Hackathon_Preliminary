@@ -1,0 +1,128 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in, headheight=15pt}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{tcolorbox}
+
+% Header and Footer Setup
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textbf{CoWork API Audit Report}}
+\lhead{Team: du\_neurons}
+\rfoot{Page \thepage}
+\lfoot{IUT 12th ICT Fest - Agentic AI Hackathon}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+% Title details
+\title{
+    \vspace{-1.5cm}
+    \textbf{\Large System Audit \& Reliability Report}\\
+    \large CoWork Multi-Tenant Booking API Platform\\
+    \vspace{0.3cm}
+    \normalsize \textit{Prepared by Team: \textbf{du\_neurons}}
+}
+\author{IUT 12th ICT Fest --- Agentic AI Hackathon Preliminary Round}
+\date{July 9, 2026}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+This report provides a formal and detailed breakdown of ten (10) logical defects, data validation issues, performance bottlenecks, and concurrency vulnerabilities discovered and mitigated in the CoWork REST API. All patches have been validated against the system's specifications, multi-tenancy requirements, and concurrent transaction execution boundaries.
+\end{abstract}
+
+\section{Executive Summary}
+During the preliminary round, the CoWork coworking space booking platform was subjected to a rigorous system audit. Ten core issues spanning API contract compliance, multi-tenant isolation, cache invalidation freshness, database query latency, and transaction race conditions were identified and patched. All fixes preserve the original API signature while securing the platform against concurrent race attacks and database lock starvation.
+
+\section{Summary of Identified Issues}
+\begin{longtable}{lllcc}
+\toprule
+\textbf{ID} & \textbf{Vulnerability / Issue Title} & \textbf{Component / Location} & \textbf{Severity} & \textbf{Status} \\
+\midrule
+01 & Error Code Formatting (Spaces vs. Underscores) & app/errors.py & High & Resolved \\
+02 & Missing Validation on Room Capacity \& Rate & app/schemas.py & Medium & Resolved \\
+03 & Datetime UTC Format Designator (`+00:00` vs `Z`) & app/timeutils.py & High & Resolved \\
+04 & Registration Org-Creation Concurrency Race & app/routers/auth.py & High & Resolved \\
+05 & Booking Overlap/Quota Race Condition (TOCTOU) & app/routers/bookings.py & Critical & Resolved \\
+06 & Incomplete and Stale Caching Integration & app/routers/rooms.py, admin.py & Medium & Resolved \\
+07 & Export CSV Header Formatting Deviation & app/services/export.py & High & Resolved \\
+08 & Missing Date Range Validity in Usage Report & app/routers/admin.py & Medium & Resolved \\
+09 & $O(N)$ N+1 Database Queries in Usage Report & app/routers/admin.py & High & Resolved \\
+10 & SQLite default DELETE mode write lock bottleneck & app/database.py & Critical & Resolved \\
+\bottomrule
+\end{longtable}
+
+\newpage
+\section{Detailed Audit \& Resolution Log}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 01: Error Response Code Formats (Spaces vs. Underscores)]
+\textbf{Location:} \texttt{app/errors.py}\\
+\textbf{Problem:} Raised system exception codes utilized Pythonic snake\_case underscores (e.g. \texttt{ROOM\_CONFLICT}), but the specification mandates space-separated capitals (e.g. \texttt{ROOM CONFLICT}).\\
+\textbf{Fix:} Updated \texttt{app\_error\_handler} exception handler to dynamically map underscores to spaces globally before JSON serialization, preserving clean exception names internally.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=yellow!5!white,colframe=yellow!75!black,title=Bug 02: Missing Validation for Room Capacity and Rates]
+\textbf{Location:} \texttt{app/schemas.py} (lines 21--25)\\
+\textbf{Problem:} Lack of lower-bound constraints allowed creation of rooms with negative or zero capacities and rates.\\
+\textbf{Fix:} Bound parameters in \texttt{RoomCreateRequest} using Pydantic's \texttt{Field(gt=0)} constraint.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 03: UTC Format Designator in Datetime Serialization]
+\textbf{Location:} \texttt{app/timeutils.py} (lines 19--26)\\
+\textbf{Problem:} Response datetimes returned Pythons default \texttt{+00:00} string designator for UTC offsets instead of the explicit ISO 8601 designator \texttt{Z}.\\
+\textbf{Fix:} Modified the \texttt{iso\_utc()} formatter to replace timezone offset suffixes with \texttt{Z}.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 04: Concurrency Race Condition in Registration]
+\textbf{Location:} \texttt{app/routers/auth.py} (lines 27--35)\\
+\textbf{Problem:} Concurrently registering users for a new organization could cause organization duplicated uniqueness checks to evaluate to false in parallel threads, resulting in a crashed commit and a false registration failure.\\
+\textbf{Fix:} Placed a database transaction lock \texttt{BEGIN IMMEDIATE} at the initiation of the registration method to serialize organization registration check-and-creates.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 05: Concurrency Race Conditions (TOCTOU) in Booking Creation/Cancellation]
+\textbf{Location:} \texttt{app/routers/bookings.py} (lines 85--145)\\
+\textbf{Problem:} Overlap and quota checks occurred inside standard deferred transactions, meaning concurrent overlapping bookings or quota bypasses were not serialized at the database engine.\\
+\textbf{Fix:} Enforced \texttt{db.execute(text("BEGIN IMMEDIATE"))} at transaction start inside both booking creation and cancellation blocks to serialize all mutations.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=yellow!5!white,colframe=yellow!75!black,title=Bug 06: Incomplete and Stale Caching Integration]
+\textbf{Location:} \texttt{app/routers/rooms.py} and \texttt{app/routers/admin.py}\\
+\textbf{Problem:} In-memory caches were ignored in GET paths. Furthermore, creating rooms left reports cached with stale data.\\
+\textbf{Fix:} Integrated cache lookup-and-writes in the availability and report paths, and invalidated the organization's report cache upon room creation.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 07: Export CSV Header Spacing Deviations]
+\textbf{Location:} \texttt{app/services/export.py} (lines 11--20)\\
+\textbf{Problem:} CSV export column headers used underscores (e.g. \texttt{price\_cents}) instead of the exact specification header titles (e.g. \texttt{price cents}).\\
+\textbf{Fix:} Modified \texttt{EXPORT\_HEADER} to align strictly with the target specification.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=yellow!5!white,colframe=yellow!75!black,title=Bug 08: Missing Date Range Validation in Usage Report]
+\textbf{Location:} \texttt{app/routers/admin.py} (lines 17--29)\\
+\textbf{Problem:} Usage reports accepted start dates succeeding end dates, returning empty lists instead of validation errors.\\
+\textbf{Fix:} Added validation verifying that \texttt{from\_date} $\le$ \texttt{to\_date}, returning \texttt{INVALID\_BOOKING\_WINDOW} (400) otherwise.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 09: N+1 Database Query Performance in Usage Report]
+\textbf{Location:} \texttt{app/routers/admin.py} (lines 41--65)\\
+\textbf{Problem:} Usage report looped through all organization rooms and executed a separate query per room to count bookings, resulting in $N+1$ database calls.\\
+\textbf{Fix:} Optimized the aggregation logic to perform a single query using an \texttt{outerjoin} and \texttt{group\_by} at the database level.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 10: SQLite Default DELETE Journal Mode (Concurrency Bottleneck)]
+\textbf{Location:} \texttt{app/database.py} (lines 13--17)\\
+\textbf{Problem:} Default SQLite configuration locked database files for writes, blocking concurrent readers and resulting in connection timeouts.\\
+\textbf{Fix:} Enabled Write-Ahead Logging (\texttt{PRAGMA journal\_mode=WAL}) and configured normal synchronization (\texttt{PRAGMA synchronous=NORMAL}) to support safe concurrent reads and writes.
+\end{tcolorbox}
+
+\end{document}
