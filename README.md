@@ -1,4 +1,6 @@
 # CoWork — Coworking Space Booking API
+### Team: `du_neurons`
+
 
 CoWork is a REST API for managing bookable rooms inside a coworking space across
 multiple tenant organizations. Each organization has its own rooms, staff
