@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from .. import cache
 from ..auth import require_admin
 from ..database import get_db
 from ..errors import AppError
+from .. import cache
 from ..models import Booking, Room, User
 from ..services.export import generate_export
 
@@ -22,15 +22,18 @@ def usage_report(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    cached = cache.get_report(admin.org_id, frm, to)
-    if cached is not None:
-        return cached
-
     try:
         from_date = datetime.strptime(frm, "%Y-%m-%d").date()
         to_date = datetime.strptime(to, "%Y-%m-%d").date()
     except ValueError:
         raise AppError(400, "INVALID_BOOKING_WINDOW", "Invalid date range")
+
+    if from_date > to_date:
+        raise AppError(400, "INVALID_BOOKING_WINDOW", "Invalid date range")
+
+    cached = cache.get_report(admin.org_id, frm, to)
+    if cached is not None:
+        return cached
 
     range_start = datetime.combine(from_date, time.min)
     range_end = datetime.combine(to_date + timedelta(days=1), time.min)

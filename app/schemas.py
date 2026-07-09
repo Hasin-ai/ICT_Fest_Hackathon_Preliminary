@@ -3,9 +3,9 @@ from pydantic import BaseModel, Field
 
 
 class RegisterRequest(BaseModel):
-    org_name: str
-    username: str
-    password: str
+    org_name: str = Field(min_length=1)
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
 
 
 class LoginRequest(BaseModel):
@@ -19,9 +19,9 @@ class RefreshRequest(BaseModel):
 
 
 class RoomCreateRequest(BaseModel):
-    name: str
-    capacity: int
-    hourly_rate_cents: int
+    name: str = Field(min_length=1)
+    capacity: int = Field(gt=0)
+    hourly_rate_cents: int = Field(gt=0)
 
 
 class BookingCreateRequest(BaseModel):
