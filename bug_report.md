@@ -92,3 +92,26 @@ This document provides a detailed breakdown of the bugs identified, analyzed, an
 - **Fix**: Added logical validation checking if `from_date > to_date` and raising `AppError(400, "INVALID_BOOKING_WINDOW", ...)` accordingly.
 - **Why fix is correct**: Rejects invalid query params before processing.
 - **Potential regressions**: None.
+
+---
+
+### Bug 9: N+1 Database Query Performance in Usage Report
+- **Location**: [app/routers/admin.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/admin.py#L41-L65)
+- **Problem**: The `/admin/usage-report` endpoint suffered from $O(N)$ database query iterations. It loaded all rooms, then queried the `bookings` table individually for each room to count and sum the bookings.
+- **Root Cause**: Implementing an ad-hoc loop query pattern rather than using SQL aggregation and joins.
+- **Impact**: Significant response latency and resource consumption under load for organizations with large numbers of bookable rooms.
+- **Fix**: Replaced the loop query with a single optimized query utilizing `outerjoin`, `group_by`, and `func` aggregation (`count` and `sum`) to fetch all room stats in one SQL statement.
+- **Why fix is correct**: Retains the exact same response layout and business logic (including zero-booking rooms) while reducing the database load to exactly 1 query.
+- **Potential regressions**: None.
+
+---
+
+### Bug 10: SQLite Default DELETE Journal Mode (Concurrency Bottleneck)
+- **Location**: [app/database.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/database.py#L13-L17)
+- **Problem**: SQLite connections defaulted to the standard `DELETE` journal mode, which acquires exclusive locks on writes and blocks concurrent reads or parallel writes.
+- **Root Cause**: The connection pool did not configure concurrent SQLite tuning parameters.
+- **Impact**: High-frequency concurrent booking creations or cancellations could result in thread starvation, database lock timeouts, or application liveness (hang) warnings.
+- **Fix**: Added connection listeners to execute `PRAGMA journal_mode=WAL` (Write-Ahead Logging) and `PRAGMA synchronous=NORMAL`.
+- **Why fix is correct**: Allows concurrent readers and writers to run safely in parallel without blocking one another, significantly improving concurrent write throughput.
+- **Potential regressions**: None.
+
