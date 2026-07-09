@@ -18,6 +18,10 @@ This document provides a highly structured breakdown of the bugs, API contract d
 | **08** | Missing Date Range Logic in Usage Report | [app/routers/admin.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/admin.py#L17-L29) | **Medium** (Validation) | ✅ Fixed |
 | **09** | $O(N)$ N+1 Database Query in Usage Report | [app/routers/admin.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/admin.py#L41-L65) | **High** (Performance) | ✅ Fixed |
 | **10** | SQLite DELETE Journal Mode Concurrency Bottleneck | [app/database.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/database.py#L13-L17) | **Critical** (Reliability) | ✅ Fixed |
+| **11** | Unbounded Cache Memory Exhaustion (Cache DoS) | [app/cache.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/cache.py) | **High** (DoS Vulnerability) | ✅ Fixed |
+| **12** | Cross-Day Booking Availability Inconsistency | [app/routers/rooms.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/rooms.py) / [bookings.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py) | **High** (Logic / API Leak) | ✅ Fixed |
+| **13** | Concurrency Reference Code Collision Error Mapping | [app/routers/bookings.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py) | **Medium** (Error Masquerade) | ✅ Fixed |
+| **14** | In-Memory Token Revocation Persistence Loss | [app/auth.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py) / [app/models.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/models.py) | **High** (Token Replay / Hijack) | ✅ Fixed |
 
 ---
 
@@ -110,3 +114,37 @@ This document provides a highly structured breakdown of the bugs, API contract d
 * 💥 **Impact:** Under high-concurrency stress tests, database connection locks timeout, causing `500 Internal Server Error`.
 * 🛡️ **Fix & Correctness:** Configured SQLite connections to use WAL Mode (`PRAGMA journal_mode=WAL`) and normal synchronization (`PRAGMA synchronous=NORMAL`). This allows parallel reads and writes without thread blocking.
 * 🔍 **Potential Regressions:** None. WAL temporary files (`*.db-shm` and `*.db-wal`) have been added to `.gitignore` to prevent tracking.
+
+---
+
+### 🛡️ Bug 11: Unbounded Cache Memory Exhaustion (Cache DoS)
+* 📍 **Location:** [app/cache.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/cache.py)
+* ⚠️ **Problem & Root Cause:** Caching dictionaries were standard Python dictionaries without any size limit or eviction policy.
+* 💥 **Impact:** An attacker could execute DoS attacks via cache poisoning by requesting unique date/report arguments repeatedly, leading to memory exhaustion and server OOM crashes.
+* 🛡️ **Fix & Correctness:** Rewrote `LRUCache` as a thread-safe wrapper subclassing standard structures to restrict max size to 1000 items, evicting the least recently used keys when exceeding capacity.
+* 🔍 **Potential Regressions:** Negligible performance overhead for maintaining keys list order.
+
+---
+
+### 🛡️ Bug 12: Cross-Day Booking Availability Inconsistency (API Leak)
+* 📍 **Location:** [app/routers/rooms.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/rooms.py) and [app/routers/bookings.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py)
+* ⚠️ **Problem & Root Cause:** The availability database query only filtered bookings starting on the queried date. Bookings ending on that day from the previous calendar day were omitted, but attempting to book those hours failed with `409 ROOM CONFLICT`. Invalidation also only cleared start dates.
+* 🛡️ **Fix & Correctness:** Replaced query checks with overlap comparison (`start_time < day_end` and `end_time > day_start`). Invalidation now clears caches for both the start and end dates of the booking if they span across different days.
+* 🔍 **Potential Regressions:** None.
+
+---
+
+### 🛡️ Bug 13: Concurrency Reference Code Collision Error Mapping (Error Masquerade)
+* 📍 **Location:** [app/routers/bookings.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/bookings.py)
+* ⚠️ **Problem & Root Cause:** The booking creation method had a generic `IntegrityError` handler that translated any database constraint failure (including unique index collisions on reference codes) into a misleading `409 ROOM CONFLICT`.
+* 🛡️ **Fix & Correctness:** Added a 3-attempt transaction retry loop. When `IntegrityError` is caught on commit, a new code is generated and retried. A permanent constraint failure raises a `500 INTERNAL_ERROR` instead of `409 ROOM CONFLICT`.
+* 🔍 **Potential Regressions:** A minor retry lock serialization delay in rare collision events.
+
+---
+
+### 🛡️ Bug 14: In-Memory Token Revocation Persistence Loss (Token Replay Vulnerability)
+* 📍 **Location:** [app/auth.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/auth.py) / [app/models.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/models.py) / [app/routers/auth.py](file:///Users/bs00851/Documents/Hackathon/ICT_Fest_Hackathon_Preliminary/app/routers/auth.py)
+* ⚠️ **Problem & Root Cause:** Token logout revocations and refresh token uses were stored in-memory in set variables. A server restart or a multi-process environment would clear this list and fail to share the state.
+* 🛡️ **Fix & Correctness:** Created database-backed tables `revoked_tokens` and `used_refresh_tokens` to record claims permanently. Checked database state during token authorization calls.
+* 🔍 **Potential Regressions:** A negligible database query latency overhead on token check.
+

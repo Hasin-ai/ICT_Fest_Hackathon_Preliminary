@@ -118,40 +118,45 @@ def create_booking(
     if duration_hours < MIN_DURATION_HOURS or duration_hours > MAX_DURATION_HOURS:
         raise AppError(400, "INVALID_BOOKING_WINDOW", "duration out of range")
 
-    with _booking_write_lock:
-        db.execute(text("BEGIN IMMEDIATE"))
-        room = db.query(Room).filter(Room.id == payload.room_id, Room.org_id == user.org_id).first()
-        if room is None:
-            raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
+    for attempt in range(3):
+        with _booking_write_lock:
+            db.execute(text("BEGIN IMMEDIATE"))
+            room = db.query(Room).filter(Room.id == payload.room_id, Room.org_id == user.org_id).first()
+            if room is None:
+                raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
 
-        if _has_conflict(db, room.id, start, end):
-            raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
+            if _has_conflict(db, room.id, start, end):
+                raise AppError(409, "ROOM_CONFLICT", "Room already booked for this interval")
 
-        _check_quota(db, user.id, now, start)
+            _check_quota(db, user.id, now, start)
 
-        price_cents = room.hourly_rate_cents * duration_hours
-        booking = Booking(
-            room_id=room.id,
-            user_id=user.id,
-            start_time=start,
-            end_time=end,
-            status="confirmed",
-            reference_code=_next_unique_reference(db),
-            price_cents=price_cents,
-            created_at=now,
-        )
-        db.add(booking)
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            raise AppError(409, "ROOM_CONFLICT", "Booking could not be created")
-        db.refresh(booking)
-
-        cache.invalidate_report(user.org_id)
-        cache.invalidate_availability(room.id, start.date().isoformat())
+            price_cents = room.hourly_rate_cents * duration_hours
+            booking = Booking(
+                room_id=room.id,
+                user_id=user.id,
+                start_time=start,
+                end_time=end,
+                status="confirmed",
+                reference_code=_next_unique_reference(db),
+                price_cents=price_cents,
+                created_at=now,
+            )
+            db.add(booking)
+            try:
+                db.commit()
+                db.refresh(booking)
+                
+                cache.invalidate_report(user.org_id)
+                cache.invalidate_availability(room.id, start.date().isoformat())
+                if start.date() != end.date():
+                    cache.invalidate_availability(room.id, end.date().isoformat())
+                break
+            except IntegrityError:
+                db.rollback()
+                if attempt == 2:
+                    raise AppError(500, "INTERNAL_ERROR", "Booking could not be created")
+    
     notifications.notify_created(booking)
-
     return serialize_booking(booking)
 
 
@@ -252,6 +257,8 @@ def cancel_booking(
 
         cache.invalidate_report(user.org_id)
         cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())
+        if booking.start_time.date() != booking.end_time.date():
+            cache.invalidate_availability(booking.room_id, booking.end_time.date().isoformat())
     notifications.notify_cancelled(booking)
 
     return {

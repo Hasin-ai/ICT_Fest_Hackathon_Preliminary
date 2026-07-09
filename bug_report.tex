@@ -38,11 +38,11 @@
 \thispagestyle{fancy}
 
 \begin{abstract}
-This report provides a formal and detailed breakdown of ten (10) logical defects, data validation issues, performance bottlenecks, and concurrency vulnerabilities discovered and mitigated in the CoWork REST API. All patches have been validated against the system's specifications, multi-tenancy requirements, and concurrent transaction execution boundaries.
+This report provides a formal and detailed breakdown of fourteen (14) logical defects, data validation issues, performance bottlenecks, and concurrency vulnerabilities discovered and mitigated in the CoWork REST API. All patches have been validated against the system's specifications, multi-tenancy requirements, and concurrent transaction execution boundaries.
 \end{abstract}
 
 \section{Executive Summary}
-During the preliminary round, the CoWork coworking space booking platform was subjected to a rigorous system audit. Ten core issues spanning API contract compliance, multi-tenant isolation, cache invalidation freshness, database query latency, and transaction race conditions were identified and patched. All fixes preserve the original API signature while securing the platform against concurrent race attacks and database lock starvation.
+During the preliminary round, the CoWork coworking space booking platform was subjected to a rigorous system audit. Fourteen core issues spanning API contract compliance, multi-tenant isolation, cache invalidation freshness, database query latency, and transaction race conditions were identified and patched. All fixes preserve the original API signature while securing the platform against concurrent race attacks and database lock starvation.
 
 \section{Summary of Identified Issues}
 \begin{longtable}{lllcc}
@@ -59,6 +59,10 @@ During the preliminary round, the CoWork coworking space booking platform was su
 08 & Missing Date Range Validity in Usage Report & app/routers/admin.py & Medium & Resolved \\
 09 & $O(N)$ N+1 Database Queries in Usage Report & app/routers/admin.py & High & Resolved \\
 10 & SQLite default DELETE mode write lock bottleneck & app/database.py & Critical & Resolved \\
+11 & Unbounded Cache Memory Exhaustion (Cache DoS) & app/cache.py & High & Resolved \\
+12 & Cross-Day Booking Availability Inconsistency & app/routers/rooms.py, bookings.py & High & Resolved \\
+13 & Booking Ref-Code Concurrency Error Mapping & app/routers/bookings.py & Medium & Resolved \\
+14 & In-Memory Token Revocation Persistence Loss & app/auth.py, models.py & High & Resolved \\
 \bottomrule
 \end{longtable}
 
@@ -123,6 +127,30 @@ During the preliminary round, the CoWork coworking space booking platform was su
 \textbf{Location:} \texttt{app/database.py} (lines 13--17)\\
 \textbf{Problem:} Default SQLite configuration locked database files for writes, blocking concurrent readers and resulting in connection timeouts.\\
 \textbf{Fix:} Enabled Write-Ahead Logging (\texttt{PRAGMA journal\_mode=WAL}) and configured normal synchronization (\texttt{PRAGMA synchronous=NORMAL}) to support safe concurrent reads and writes.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 11: Unbounded Cache Memory Exhaustion (Cache DoS)]
+\textbf{Location:} \texttt{app/cache.py}\\
+\textbf{Problem:} The response caching structures used raw Python dicts without size constraints or TTL, allowing attackers to exhaust memory (DoS) by querying infinite unique combinations.\\
+\textbf{Fix:} Wrapped caching collections in a thread-safe \texttt{LRUCache} limiting max capacity to 1000 entries.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 12: Cross-Day Booking Availability Inconsistency (API Leak)]
+\textbf{Location:} \texttt{app/routers/rooms.py} and \texttt{app/routers/bookings.py}\\
+\textbf{Problem:} Availability queries checked only start times on the target day. Cross-day bookings ending on that day were omitted in availability but blocked bookings with a \texttt{409 ROOM CONFLICT}. Invalidation also missed the end dates.\\
+\textbf{Fix:} Modified checks to detect overlapping bookings (\texttt{start\_time < day\_end} and \texttt{end\_time > day\_start}). Cache invalidation now clears both dates.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=yellow!5!white,colframe=yellow!75!black,title=Bug 13: Concurrency Reference Code Collision Error Mapping (Error Masquerade)]
+\textbf{Location:} \texttt{app/routers/bookings.py}\\
+\textbf{Problem:} The API creation routine caught generic database \texttt{IntegrityError}s on transaction commit (e.g. from unique reference code conflicts) and incorrectly mapped them to \texttt{409 ROOM CONFLICT}.\\
+\textbf{Fix:} Created a 3-attempt database write retry loop that generates a new code upon collision, raising a \texttt{500 INTERNAL\_ERROR} if all fail.
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=Bug 14: In-Memory Token Revocation Persistence Loss]
+\textbf{Location:} \texttt{app/auth.py}, \texttt{app/models.py}, and \texttt{app/routers/auth.py}\\
+\textbf{Problem:} Logout blacklists and single-use refresh token tracking lists were held purely in-memory. Server restarts or multi-process instances would lose this state, enabling token replay attacks.\\
+\textbf{Fix:} Created database-persisted tables \texttt{revoked\_tokens} and \texttt{used\_refresh\_tokens} to log claims persistently.
 \end{tcolorbox}
 
 \end{document}

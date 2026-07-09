@@ -18,7 +18,7 @@ from .config import (
 )
 from .database import get_db
 from .errors import AppError
-from .models import User
+from .models import User, RevokedToken, UsedRefreshToken
 
 # Access tokens presented to /auth/logout are recorded here so they can no
 # longer be used.
@@ -90,20 +90,34 @@ def decode_token(token: str) -> dict:
         raise AppError(401, "UNAUTHORIZED", "Invalid or expired token")
 
 
-def revoke_access_token(payload: dict) -> None:
+def revoke_access_token(db: Session, payload: dict) -> None:
+    jti = payload["jti"]
+    exp = datetime.utcfromtimestamp(payload["exp"])
     with _token_lock:
-        _revoked_tokens.add(payload["jti"])
+        _revoked_tokens.add(jti)
+    exists = db.query(RevokedToken).filter(RevokedToken.jti == jti).first()
+    if not exists:
+        db.add(RevokedToken(jti=jti, expires_at=exp))
+        db.commit()
 
 
-def consume_refresh_token(payload: dict) -> None:
+def consume_refresh_token(db: Session, payload: dict) -> None:
+    jti = payload["jti"]
+    exp = datetime.utcfromtimestamp(payload["exp"])
     with _token_lock:
-        jti = payload["jti"]
         if jti in _used_refresh_tokens:
             raise AppError(401, "UNAUTHORIZED", "Refresh token has been used")
         _used_refresh_tokens.add(jti)
 
+    exists = db.query(UsedRefreshToken).filter(UsedRefreshToken.jti == jti).first()
+    if exists:
+        raise AppError(401, "UNAUTHORIZED", "Refresh token has been used")
 
-def get_token_payload(request: Request) -> dict:
+    db.add(UsedRefreshToken(jti=jti, expires_at=exp))
+    db.commit()
+
+
+def get_token_payload(request: Request, db: Session = Depends(get_db)) -> dict:
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
         raise AppError(401, "UNAUTHORIZED", "Missing bearer token")
@@ -111,10 +125,18 @@ def get_token_payload(request: Request) -> dict:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
+    jti = payload["jti"]
     with _token_lock:
-        if payload["jti"] in _revoked_tokens:
+        if jti in _revoked_tokens:
             raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
+
+    revoked = db.query(RevokedToken).filter(RevokedToken.jti == jti).first()
+    if revoked:
+        with _token_lock:
+            _revoked_tokens.add(jti)
+        raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
     return payload
+
 
 
 def get_current_user(
