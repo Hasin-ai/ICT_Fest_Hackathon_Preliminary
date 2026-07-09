@@ -3,6 +3,7 @@ from datetime import datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..auth import require_admin
@@ -38,27 +39,34 @@ def usage_report(
     range_start = datetime.combine(from_date, time.min)
     range_end = datetime.combine(to_date + timedelta(days=1), time.min)
 
-    rooms = db.query(Room).filter(Room.org_id == admin.org_id).order_by(Room.id.asc()).all()
-    room_rows = []
-    for room in rooms:
-        bookings = (
-            db.query(Booking)
-            .filter(
-                Booking.room_id == room.id,
-                Booking.status == "confirmed",
-                Booking.start_time >= range_start,
-                Booking.start_time < range_end,
-            )
-            .all()
+    results = (
+        db.query(
+            Room.id,
+            Room.name,
+            func.count(Booking.id).label("booking_count"),
+            func.coalesce(func.sum(Booking.price_cents), 0).label("revenue")
         )
-        room_rows.append(
-            {
-                "room_id": room.id,
-                "room_name": room.name,
-                "confirmed_bookings": len(bookings),
-                "revenue_cents": sum(b.price_cents for b in bookings),
-            }
+        .outerjoin(
+            Booking,
+            (Booking.room_id == Room.id) &
+            (Booking.status == "confirmed") &
+            (Booking.start_time >= range_start) &
+            (Booking.start_time < range_end)
         )
+        .filter(Room.org_id == admin.org_id)
+        .group_by(Room.id, Room.name)
+        .order_by(Room.id.asc())
+        .all()
+    )
+    room_rows = [
+        {
+            "room_id": r_id,
+            "room_name": r_name,
+            "confirmed_bookings": b_count,
+            "revenue_cents": rev,
+        }
+        for r_id, r_name, b_count, rev in results
+    ]
 
     result = {"from": frm, "to": to, "rooms": room_rows}
     cache.set_report(admin.org_id, frm, to, result)

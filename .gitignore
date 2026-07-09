@@ -112,3 +112,5 @@ Thumbs.db
 *.sqlite
 *.sqlite-journal
 *.db-journal
+*.db-shm
+*.db-wal
